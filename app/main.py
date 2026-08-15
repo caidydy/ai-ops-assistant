@@ -14,6 +14,7 @@ from app.config import config
 from loguru import logger
 from app.api import chat, health, file, aiops
 from app.core.milvus_client import milvus_manager
+from app.services.bm25_service import bm25_service
 
 
 @asynccontextmanager
@@ -30,6 +31,12 @@ async def lifespan(app: FastAPI):
     logger.info("🔌 正在连接 Milvus...")
     milvus_manager.connect()
     logger.info("✅ Milvus 连接成功")
+    
+    # 重建 BM25 内存索引（混合检索需要，从 Milvus 全量加载）
+    if config.hybrid_search_enabled:
+        logger.info("🔍 正在重建 BM25 索引...")
+        bm25_service.rebuild()
+        logger.info("✅ BM25 索引重建完成")
     
     logger.info("=" * 60)
     

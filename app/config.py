@@ -38,6 +38,21 @@ class Settings(BaseSettings):
     rag_top_k: int = 3
     rag_model: str = "qwen-max"  # 使用快速响应模型，不带扩展思考
 
+    # 重排（Rerank）配置：召回后使用百炼重排模型对文档相关性重新排序
+    rerank_enabled: bool = True  # 是否启用重排（关闭时退化为纯向量召回）
+    rerank_model: str = "qwen3-rerank"  # 百炼重排模型（gte-rerank 已于 2026-05-30 下线）
+    rerank_retrieve_k: int = 6  # 向量召回窗口（扩大召回，重排后截取前 rag_top_k 条）
+
+    @property
+    def rerank_final_k(self) -> int:
+        """重排后最终返回的文档条数，对齐 rag_top_k"""
+        return self.rag_top_k
+
+    # 混合检索配置：向量召回（余弦相似度）+ BM25 词法召回，RRF 融合后送入重排
+    hybrid_search_enabled: bool = True  # 是否启用混合检索（关闭时退化纯向量召回）
+    bm25_retrieve_k: int = 6  # BM25 召回窗口（与 rerank_retrieve_k 对齐，融合前各取 N 条）
+    rrf_k: int = 60  # RRF 融合常数（业界标准值，控制排名权重衰减）
+
     # 文档分块配置
     chunk_max_size: int = 800
     chunk_overlap: int = 100
