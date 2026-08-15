@@ -6,6 +6,9 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+from app.config import config
+from app.services.bm25_service import bm25_service
+from app.services.document_loader_service import document_loader_service, SUPPORTED_EXTENSIONS
 from app.services.document_splitter_service import document_splitter_service
 from app.services.vector_store_manager import vector_store_manager
 
@@ -87,8 +90,11 @@ class VectorIndexService:
 
             result.directory_path = str(dir_path)
 
-            # 获取所有支持的文件
-            files = list(dir_path.glob("*.txt")) + list(dir_path.glob("*.md"))
+            # 获取所有支持的文件（多格式：md/txt/pdf/docx/xlsx）
+            files: list = []
+            for ext in sorted(SUPPORTED_EXTENSIONS):
+                files.extend(dir_path.glob(f"*.{ext}"))
+            files = sorted(set(files))
 
             if not files:
                 logger.warning(f"目录中没有找到支持的文件: {target_path}")
@@ -147,21 +153,25 @@ class VectorIndexService:
         logger.info(f"开始索引文件: {path}")
 
         try:
-            # 1. 读取文件内容
-            content = path.read_text(encoding="utf-8")
-            logger.info(f"读取文件: {path}, 内容长度: {len(content)} 字符")
+            # 1. 加载文件内容（支持 md/txt/pdf/docx/xlsx 多格式）
+            content = document_loader_service.load(str(path))
+            logger.info(f"加载文件: {path}, 内容长度: {len(content)} 字符")
 
-            # 2. 删除该文件的旧数据（如果存在）
+            # 2. 删除该文件的旧数据（如果存在）——Milvus 与 BM25 内存索引同步删除
             normalized_path = path.as_posix()
             vector_store_manager.delete_by_source(normalized_path)
+            if config.hybrid_search_enabled:
+                bm25_service.remove_by_source(normalized_path)
 
-            # 3. 使用新的文档分割器
+            # 3. 使用文档分割器
             documents = document_splitter_service.split_document(content, normalized_path)
             logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
 
-            # 4. 添加文档到向量存储
+            # 4. 添加文档到向量存储，并同步 BM25 内存索引
             if documents:
                 vector_store_manager.add_documents(documents)
+                if config.hybrid_search_enabled:
+                    bm25_service.add_documents(documents)
                 logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
             else:
                 logger.warning(f"文件内容为空或无法分割: {file_path}")

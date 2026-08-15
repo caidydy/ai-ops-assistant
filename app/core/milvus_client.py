@@ -47,6 +47,7 @@ class MilvusClientManager:
     # 常量定义
     COLLECTION_NAME: str = "biz"
     VECTOR_DIM: int = 1024  # 统一使用 1024 维
+    INDEX_METRIC_TYPE: str = "COSINE"  # 向量检索度量：余弦相似度
     ID_MAX_LENGTH: int = 100
     CONTENT_MAX_LENGTH: int = 8000
     DEFAULT_SHARD_NUMBER: int = 2
@@ -98,29 +99,24 @@ class MilvusClientManager:
             else:
                 logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
                 self._collection = Collection(self.COLLECTION_NAME)
-                
-                # 检查向量维度是否匹配
-                schema = self._collection.schema
-                vector_field = None
-                existing_dim = None
-                for field in schema.fields:
-                    if field.name == "vector":
-                        vector_field = field
-                        break
-                
-                if vector_field and hasattr(vector_field, 'params') and 'dim' in vector_field.params:
-                    existing_dim = vector_field.params['dim']
-                    if existing_dim != self.VECTOR_DIM:
-                        logger.warning(
-                            f"检测到向量维度不匹配！当前 collection 维度: {existing_dim}, 配置维度: {self.VECTOR_DIM}"
-                        )
-                        logger.info(f"正在删除旧 collection '{self.COLLECTION_NAME}'...")
-                        _ = utility.drop_collection(self.COLLECTION_NAME)
-                        logger.info(f"正在重新创建 collection '{self.COLLECTION_NAME}'...")
-                        self._create_collection()
-                        logger.info(f"成功重新创建 collection，维度: {self.VECTOR_DIM}")
-                    else:
-                        logger.info(f"向量维度匹配: {self.VECTOR_DIM}")
+
+                # 检查向量维度与索引度量类型是否与配置一致（不一致时重建 collection）
+                if self._schema_mismatch():
+                    logger.warning(
+                        f"检测到 collection 配置不匹配（维度或度量类型），"
+                        f"正在删除并重建 collection '{self.COLLECTION_NAME}'..."
+                    )
+                    _ = utility.drop_collection(self.COLLECTION_NAME)
+                    self._create_collection()
+                    logger.info(
+                        f"成功重新创建 collection: "
+                        f"维度={self.VECTOR_DIM}, 度量={self.INDEX_METRIC_TYPE}"
+                    )
+                else:
+                    logger.info(
+                        f"collection 配置匹配: "
+                        f"维度={self.VECTOR_DIM}, 度量={self.INDEX_METRIC_TYPE}"
+                    )
 
             # 加载 collection
             self._load_collection()
@@ -145,6 +141,65 @@ class MilvusClientManager:
         # pymilvus 的类型标注可能不准确，实际返回 bool
         result = utility.has_collection(self.COLLECTION_NAME)
         return bool(result)  # type: ignore[arg-type]
+
+    def _schema_mismatch(self) -> bool:
+        """
+        检查现有 collection 的向量维度与索引度量类型是否与配置一致
+
+        Returns:
+            bool: True 表示存在不一致（维度或度量类型不匹配），需要重建
+        """
+        if self._collection is None:
+            return False
+
+        # 1. 检查向量维度
+        schema = self._collection.schema
+        vector_field = None
+        for field in schema.fields:
+            if field.name == "vector":
+                vector_field = field
+                break
+
+        if (
+            vector_field
+            and hasattr(vector_field, "params")
+            and "dim" in vector_field.params
+            and vector_field.params["dim"] != self.VECTOR_DIM
+        ):
+            logger.warning(
+                f"向量维度不匹配: collection={vector_field.params['dim']}, "
+                f"配置={self.VECTOR_DIM}"
+            )
+            return True
+
+        # 2. 检查索引度量类型（如 L2 / IP / COSINE）
+        existing_metric = self._collection_metric_type()
+        if existing_metric and existing_metric != self.INDEX_METRIC_TYPE:
+            logger.warning(
+                f"索引度量类型不匹配: collection={existing_metric}, "
+                f"配置={self.INDEX_METRIC_TYPE}"
+            )
+            return True
+
+        return False
+
+    def _collection_metric_type(self) -> str | None:
+        """
+        读取现有 collection 的向量索引度量类型
+
+        Returns:
+            str | None: 度量类型（大写，如 "L2" / "COSINE"），读取失败时返回 None
+        """
+        if self._collection is None:
+            return None
+        try:
+            for index in self._collection.indexes:
+                params = getattr(index, "params", None)
+                if isinstance(params, dict) and "metric_type" in params:
+                    return str(params["metric_type"]).upper()
+        except Exception as e:
+            logger.warning(f"读取索引度量类型失败（跳过度量校验）: {e}")
+        return None
 
     def _create_collection(self) -> None:
         """创建 biz collection"""
@@ -195,7 +250,7 @@ class MilvusClientManager:
             raise RuntimeError("Collection 未初始化")
 
         index_params = {
-            "metric_type": "L2",  # 欧氏距离
+            "metric_type": self.INDEX_METRIC_TYPE,  # 余弦相似度
             "index_type": "IVF_FLAT",
             "params": {"nlist": 128},
         }

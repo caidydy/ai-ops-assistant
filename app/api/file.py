@@ -12,8 +12,8 @@ router = APIRouter()
 
 # 文件上传后存储的路径
 UPLOAD_DIR = Path("./uploads")
-# 支持的文件类型
-ALLOWED_EXTENSIONS = ["txt", "md"]
+# 支持的文件类型（与 document_loader_service 保持一致）
+ALLOWED_EXTENSIONS = ["txt", "md", "pdf", "docx", "xlsx"]
 # 单个文件支持最大大小
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 

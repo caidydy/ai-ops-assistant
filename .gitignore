@@ -82,3 +82,7 @@ dmypy.json
 # Ruff
 .ruff_cache/
 
+# 本地文档（仅存本地，不提交 GitHub）
+update/
+aiops-docs/
+
