@@ -4,7 +4,9 @@
 支持真正的流式输出和更好的模型适配。
 """
 
-from typing import Annotated, Any, AsyncGenerator, Dict, Sequence
+from collections.abc import AsyncGenerator, Sequence
+from datetime import datetime
+from typing import Annotated, Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware
@@ -13,19 +15,19 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
 )
-from langgraph.checkpoint.memory import MemorySaver
+from langchain_qwq import ChatQwen
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import add_messages
 from loguru import logger
 from typing_extensions import TypedDict
-from langchain_qwq import ChatQwen
-from datetime import datetime
 
-from app.config import config
-from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 from app.agent.mcp_client import (
+    format_exception_chain,
     load_mcp_tools_independently,
     suggest_mcp_transport,
 )
+from app.config import config
+from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 
 # 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
 # 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
@@ -75,8 +77,8 @@ class RagAgentService:
         # MCP 客户端（延迟初始化，使用全局管理）
         self.mcp_tools: list = []
 
-        # 创建内存检查点（用于会话管理）
-        self.checkpointer = MemorySaver()
+        # 检查点器（用于会话持久化）：由 main.py lifespan 初始化，SQLite 持久化到磁盘
+        self.checkpointer: AsyncSqliteSaver | None = None
 
         # Agent 初始化（会在异步方法中完成）
         self.agent = None
@@ -88,6 +90,13 @@ class RagAgentService:
         """异步初始化 Agent（包括 MCP 工具）"""
         if self._agent_initialized:
             return
+
+        # 检查点器由 main.py lifespan 在应用启动时初始化
+        if self.checkpointer is None:
+            raise RuntimeError(
+                "checkpointer 未初始化：请确认应用已通过 lifespan 调用 "
+                "rag_agent_service.set_checkpointer()"
+            )
 
         for name, server in config.mcp_servers.items():
             hint = suggest_mcp_transport(
@@ -220,7 +229,7 @@ class RagAgentService:
         self,
         question: str,
         session_id: str,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         流式处理用户问题（逐步返回答案片段）
 
@@ -286,9 +295,9 @@ class RagAgentService:
             )
             yield {"type": "error", "data": detail}
 
-    def get_session_history(self, session_id: str) -> list:
+    async def get_session_history(self, session_id: str) -> list:
         """
-        获取会话历史（从 MemorySaver checkpointer 中读取）
+        获取会话历史（从 SQLite 检查点中读取，服务重启后仍可恢复）
 
         Args:
             session_id: 会话ID（即 thread_id）
@@ -297,16 +306,20 @@ class RagAgentService:
             list: 消息历史列表 [{"role": "user|assistant", "content": "...", "timestamp": "..."}]
         """
         try:
+            if self.checkpointer is None:
+                logger.warning(f"获取会话历史: {session_id}, 检查点器未初始化")
+                return []
+
             # 使用 checkpointer 的 get 方法获取最新的检查点
             config = {"configurable": {"thread_id": session_id}}
-            
+
             # 获取该 thread 的最新检查点
-            checkpoint_tuple = self.checkpointer.get(config)
-            
+            checkpoint_tuple = await self.checkpointer.aget_tuple(config)
+
             if not checkpoint_tuple:
                 logger.info(f"获取会话历史: {session_id}, 消息数量: 0")
                 return []
-            
+
             # checkpoint_tuple 可能是命名元组或普通元组，安全地提取 checkpoint
             # 通常第一个元素是 checkpoint 数据
             if hasattr(checkpoint_tuple, 'checkpoint'):
@@ -314,10 +327,10 @@ class RagAgentService:
             else:
                 # 如果是普通元组，第一个元素是 checkpoint
                 checkpoint_data = checkpoint_tuple[0] if checkpoint_tuple else {}
-            
+
             # 从检查点中提取消息
             messages = checkpoint_data.get("channel_values", {}).get("messages", [])
-            
+
             # 转换为前端需要的格式
             history = []
             summary_replaced = False
@@ -345,7 +358,7 @@ class RagAgentService:
 
                 role = "user" if isinstance(msg, HumanMessage) else "assistant"
                 content = msg.content if hasattr(msg, 'content') else str(msg)
-                
+
                 # 提取时间戳（如果有的话）
                 timestamp = getattr(msg, 'timestamp', None)
                 if timestamp:
@@ -360,19 +373,19 @@ class RagAgentService:
                         "content": content,
                         "timestamp": datetime.now().isoformat()
                     })
-            
+
             if summary_replaced:
                 logger.info(f"[会话 {session_id}] 历史包含压缩摘要（早期对话已总结为 1 条）")
             logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
             return history
-            
+
         except Exception as e:
             logger.error(f"获取会话历史失败: {session_id}, 错误: {e}")
             return []
 
-    def clear_session(self, session_id: str) -> bool:
+    async def clear_session(self, session_id: str) -> bool:
         """
-        清空会话历史（从 MemorySaver checkpointer 中删除）
+        清空会话历史（从 SQLite 检查点中删除）
 
         Args:
             session_id: 会话ID（即 thread_id）
@@ -381,12 +394,16 @@ class RagAgentService:
             bool: 是否成功
         """
         try:
+            if self.checkpointer is None:
+                logger.warning(f"清空会话: {session_id}, 检查点器未初始化")
+                return False
+
             # 使用 checkpointer 的 delete_thread 方法删除该 thread 的所有检查点
-            self.checkpointer.delete_thread(session_id)
-            
+            await self.checkpointer.adelete_thread(session_id)
+
             logger.info(f"已清除会话历史: {session_id}")
             return True
-            
+
         except Exception as e:
             logger.error(f"清空会话历史失败: {session_id}, 错误: {e}")
             return False
@@ -395,10 +412,39 @@ class RagAgentService:
         """清理资源"""
         try:
             logger.info("清理 RAG Agent 服务资源...")
+            await self.close_checkpointer()
             # MCP 客户端由全局管理器统一管理，无需手动清理
             logger.info("RAG Agent 服务资源已清理")
         except Exception as e:
             logger.error(f"清理资源失败: {e}")
+
+    async def set_checkpointer(self, checkpointer: AsyncSqliteSaver) -> None:
+        """设置持久化检查点器（由 main.py lifespan 启动时调用）
+
+        若 Agent 已初始化，需要重新绑定新的 checkpointer。
+
+        Args:
+            checkpointer: SQLite 持久化检查点器
+        """
+        self.checkpointer = checkpointer
+        if self._agent_initialized and self.agent is not None:
+            # Agent 已创建过，需用新 checkpointer 重新创建
+            self._agent_initialized = False
+            await self._initialize_agent()
+            logger.info("已重新绑定检查点器到现有 Agent")
+
+    async def close_checkpointer(self) -> None:
+        """关闭检查点器连接（由 main.py lifespan 关闭时调用）"""
+        cp = self.checkpointer
+        self.checkpointer = None
+        self._agent_initialized = False
+        self.agent = None
+        if cp is not None:
+            try:
+                await cp.close()
+                logger.info("已关闭记忆持久化连接")
+            except Exception as e:
+                logger.warning(f"关闭检查点器连接失败: {e}")
 
 
 # 全局单例 - 启用流式输出
