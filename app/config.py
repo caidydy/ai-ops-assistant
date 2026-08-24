@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     rag_top_k: int = 3
     rag_model: str = "qwen-max"  # 使用快速响应模型，不带扩展思考
 
+    # 对话上下文自动压缩配置（基于 langchain SummarizationMiddleware）
+    # 当会话历史 token 数达到上下文窗口的 context_compress_ratio 比例时，
+    # 自动调用大模型把早期消息总结成一条摘要，并保留最近 context_keep_messages 条消息
+    context_window_tokens: int = 32768  # 模型上下文窗口大小（qwen-max 为 32K）
+    context_compress_ratio: float = 0.7  # 触发压缩的上下文占用比例（70% 时触发）
+    context_keep_messages: int = 20  # 压缩后保留的最近消息条数（20 条 ≈ 10 轮对话）
+
     # 重排（Rerank）配置：召回后使用百炼重排模型对文档相关性重新排序
     rerank_enabled: bool = True  # 是否启用重排（关闭时退化为纯向量召回）
     rerank_model: str = "qwen3-rerank"  # 百炼重排模型（gte-rerank 已于 2026-05-30 下线）

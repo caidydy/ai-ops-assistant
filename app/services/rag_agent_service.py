@@ -7,17 +7,18 @@
 from typing import Annotated, Any, AsyncGenerator, Dict, Sequence
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
-    RemoveMessage,
     SystemMessage,
 )
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
+from langgraph.graph.message import add_messages
 from loguru import logger
 from typing_extensions import TypedDict
 from langchain_qwq import ChatQwen
+from datetime import datetime
 
 from app.config import config
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
@@ -34,46 +35,6 @@ from app.agent.mcp_client import (
 class AgentState(TypedDict):
     """Agent 状态"""
     messages: Annotated[Sequence[BaseMessage], add_messages]
-
-
-def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
-    """
-    修剪消息历史，只保留最近的几条消息以适应上下文窗口
-
-    策略：
-    - 保留第一条系统消息（System Message）
-    - 保留最近的 6 条消息（3 轮对话）
-    - 当消息少于等于 7 条时，不做修剪
-
-    Args:
-        state: Agent 状态
-
-    Returns:
-        包含修剪后消息的字典，如果无需修剪则返回 None
-    """
-    messages = state["messages"]
-
-    # 如果消息数量较少，无需修剪
-    if len(messages) <= 7:
-        return None
-
-    # 提取第一条系统消息
-    first_msg = messages[0]
-
-    # 保留最近的 6 条消息（确保包含完整的对话轮次）
-    recent_messages = messages[-6:] if len(messages) % 2 == 0 else messages[-7:]
-
-    # 构建新的消息列表
-    new_messages = [first_msg] + list(recent_messages)
-
-    logger.debug(f"修剪消息历史: {len(messages)} -> {len(new_messages)} 条")
-
-    return {
-        "messages": [
-            RemoveMessage(id=REMOVE_ALL_MESSAGES),
-            *new_messages
-        ]
-    }
 
 
 class RagAgentService:
@@ -95,6 +56,17 @@ class RagAgentService:
             api_key=config.dashscope_api_key,
             temperature=0.7,
             streaming=streaming,
+            # 显式声明模型上下文窗口大小，供 SummarizationMiddleware 按比例触发压缩
+            profile={"max_input_tokens": config.context_window_tokens},
+        )
+
+        # 上下文自动压缩中间件：
+        # - 当会话历史 token 达到上下文窗口的 context_compress_ratio（默认 70%）时触发
+        # - 触发后调用大模型把早期消息总结成摘要，保留最近 context_keep_messages 条消息
+        self.summarization_middleware = SummarizationMiddleware(
+            model=self.model,
+            trigger=("fraction", config.context_compress_ratio),
+            keep=("messages", config.context_keep_messages),
         )
 
         # 定义基础工具（与 AIOps Planner/Executor 使用同一套默认本地工具）
@@ -139,6 +111,7 @@ class RagAgentService:
             self.model,
             tools=all_tools,
             checkpointer=self.checkpointer,
+            middleware=[self.summarization_middleware],
         )
 
         self._agent_initialized = True
@@ -347,11 +320,29 @@ class RagAgentService:
             
             # 转换为前端需要的格式
             history = []
+            summary_replaced = False
             for msg in messages:
                 # 跳过系统消息
                 if isinstance(msg, SystemMessage):
                     continue
-                    
+
+                # 压缩中间件生成的摘要消息：以"Here is a summary..."开头，标记 lc_source=summarization
+                # 压缩发生时，这部分旧对话已被总结成一条摘要，直接展示给前端
+                is_summary = (
+                    getattr(msg, "additional_kwargs", {}) or {}
+                ).get("lc_source") == "summarization"
+
+                if is_summary:
+                    role = "assistant"
+                    content = str(msg.content)
+                    summary_replaced = True
+                    history.append({
+                        "role": role,
+                        "content": content,
+                        "timestamp": datetime.now().isoformat(),
+                    })
+                    continue
+
                 role = "user" if isinstance(msg, HumanMessage) else "assistant"
                 content = msg.content if hasattr(msg, 'content') else str(msg)
                 
@@ -364,13 +355,14 @@ class RagAgentService:
                         "timestamp": timestamp
                     })
                 else:
-                    from datetime import datetime
                     history.append({
                         "role": role,
                         "content": content,
                         "timestamp": datetime.now().isoformat()
                     })
             
+            if summary_replaced:
+                logger.info(f"[会话 {session_id}] 历史包含压缩摘要（早期对话已总结为 1 条）")
             logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
             return history
             
