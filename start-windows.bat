@@ -114,8 +114,8 @@ if errorlevel 1 (
     echo [Warning] The API may still be starting. Check logs\app_*.log.
 ) else (
     echo [OK] FastAPI service is running.
-    echo [Info] Uploading Markdown files from aiops-docs...
-    for %%f in (aiops-docs\*.md) do (
+    echo [Info] Uploading knowledge files from aiops-docs (md/txt/pdf/docx/xlsx)...
+    for %%f in (aiops-docs\*.md aiops-docs\*.txt aiops-docs\*.pdf aiops-docs\*.docx aiops-docs\*.xlsx) do (
         echo   Uploading %%~nxf
         curl -s -X POST http://localhost:9900/api/upload -F "file=@%%f" >nul 2>&1
     )
