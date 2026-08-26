@@ -13,8 +13,36 @@ class AiOpsAssistantApp {
         this.bindEvents();
         this.updateUI();
         this.initMarkdown();
+        this.initTheme();
         this.checkAndSetCentered();
         this.renderChatHistory();
+    }
+
+    // 初始化主题（从 localStorage 读取，默认浅色）
+    initTheme() {
+        const saved = localStorage.getItem('baize-theme');
+        const dark = saved ? saved === 'dark' : false;
+        this.applyTheme(dark, false);
+    }
+
+    // 应用主题
+    applyTheme(dark, save = true) {
+        document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+        if (this.themeToggle) this.themeToggle.checked = dark;
+        if (save) {
+            localStorage.setItem('baize-theme', dark ? 'dark' : 'light');
+        }
+        // 同步代码高亮主题（明/暗）
+        const hlLight = document.getElementById('hljs-light');
+        const hlDark = document.getElementById('hljs-dark');
+        if (hlLight) hlLight.disabled = dark;
+        if (hlDark) hlDark.disabled = !dark;
+    }
+
+    // 切换主题
+    toggleTheme(dark) {
+        this.applyTheme(dark);
+        this.showNotification(dark ? '已切换至夜间模式' : '已切换至日间模式', 'info');
     }
 
     // 初始化Markdown配置
@@ -99,8 +127,12 @@ class AiOpsAssistantApp {
         this.newChatBtn = document.getElementById('newChatBtn');
         this.aiOpsSidebarBtn = document.getElementById('aiOpsSidebarBtn');
         
+        // 主题切换
+        this.themeToggle = document.getElementById('themeToggle');
+        
         // 输入区域元素
         this.messageInput = document.getElementById('messageInput');
+        this.inputWrapper = document.getElementById('inputWrapper');
         this.sendButton = document.getElementById('sendButton');
         this.toolsBtn = document.getElementById('toolsBtn');
         this.toolsMenu = document.getElementById('toolsMenu');
@@ -109,6 +141,13 @@ class AiOpsAssistantApp {
         this.modeDropdown = document.getElementById('modeDropdown');
         this.currentModeText = document.getElementById('currentModeText');
         this.fileInput = document.getElementById('fileInput');
+        
+        // 上传进度条
+        this.uploadProgress = document.getElementById('uploadProgress');
+        this.uploadProgressBar = document.getElementById('uploadProgressBar');
+        this.uploadProgressName = document.getElementById('uploadProgressName');
+        this.uploadProgressPercent = document.getElementById('uploadProgressPercent');
+        this.dropOverlay = document.getElementById('dropOverlay');
         
         // 聊天区域元素
         this.chatMessages = document.getElementById('chatMessages');
@@ -132,6 +171,43 @@ class AiOpsAssistantApp {
         if (this.aiOpsSidebarBtn) {
             this.aiOpsSidebarBtn.addEventListener('click', () => this.triggerAIOps());
         }
+        
+        // 主题切换（侧边栏开关）
+        if (this.themeToggle) {
+            this.themeToggle.addEventListener('change', (e) => {
+                this.applyTheme(e.target.checked);
+                this.showNotification(e.target.checked ? '已切换至夜间模式' : '已切换至日间模式', 'info');
+            });
+        }
+        
+        // 欢迎页快捷建议：点击填入输入框并聚焦
+        document.querySelectorAll('.suggestion-chip').forEach(chip => {
+            chip.addEventListener('click', () => {
+                if (this.messageInput) {
+                    this.messageInput.value = chip.dataset.question || '';
+                    this.autoResizeTextarea();
+                    this.messageInput.focus();
+                }
+            });
+        });
+        
+        // textarea 自适应高度
+        if (this.messageInput) {
+            this.messageInput.addEventListener('input', () => this.autoResizeTextarea());
+            this.messageInput.addEventListener('keydown', (e) => {
+                // 回车发送，Shift+Enter 换行
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    this.sendMessage();
+                }
+            });
+        }
+        
+        // 拖拽上传
+        if (this.fileInput) {
+            this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
+        }
+        this.bindDragAndDrop();
         
         // 模式选择下拉菜单
         if (this.modeSelectorBtn) {
@@ -164,15 +240,6 @@ class AiOpsAssistantApp {
             this.sendButton.addEventListener('click', () => this.sendMessage());
         }
         
-        if (this.messageInput) {
-            this.messageInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    this.sendMessage();
-                }
-            });
-        }
-        
         // 工具按钮和菜单
         if (this.toolsBtn) {
             this.toolsBtn.addEventListener('click', (e) => {
@@ -199,10 +266,63 @@ class AiOpsAssistantApp {
                 this.closeToolsMenu();
             }
         });
+    }
+
+    // textarea 自适应高度（输入时根据内容自动伸缩）
+    autoResizeTextarea() {
+        if (!this.messageInput) return;
+        // 先重置高度，再按 scrollHeight 撑开（支持多行）
+        this.messageInput.style.height = 'auto';
+        const nextHeight = Math.min(this.messageInput.scrollHeight, 160);
+        this.messageInput.style.height = nextHeight + 'px';
+    }
+
+    // 绑定拖拽上传事件
+    bindDragAndDrop() {
+        let dragDepth = 0;
         
-        if (this.fileInput) {
-            this.fileInput.addEventListener('change', (e) => this.handleFileSelect(e));
-        }
+        document.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            // 忽略从文本/元素内部拖拽的情况
+            if (!e.dataTransfer || !this.containsFiles(e.dataTransfer)) return;
+            dragDepth++;
+            if (this.dropOverlay) {
+                this.dropOverlay.classList.add('dragging');
+            }
+        });
+        
+        document.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            if (this.dropOverlay) {
+                this.dropOverlay.classList.add('over');
+            }
+        });
+        
+        document.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            if (!e.dataTransfer || !this.containsFiles(e.dataTransfer)) return;
+            dragDepth = Math.max(0, dragDepth - 1);
+            if (dragDepth === 0 && this.dropOverlay) {
+                this.dropOverlay.classList.remove('dragging', 'over');
+            }
+        });
+        
+        document.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dragDepth = 0;
+            if (this.dropOverlay) {
+                this.dropOverlay.classList.remove('dragging', 'over');
+            }
+            const files = e.dataTransfer ? e.dataTransfer.files : [];
+            if (files.length > 0) {
+                this.handleFileSelect({ target: { files: files } });
+            }
+        });
+    }
+
+    // 检查拖拽数据中是否包含文件
+    containsFiles(dataTransfer) {
+        return dataTransfer && Array.from(dataTransfer.types || []).includes('Files');
     }
 
     // 切换工具菜单显示/隐藏
@@ -250,7 +370,10 @@ class AiOpsAssistantApp {
         // 清空输入框
         if (this.messageInput) {
             this.messageInput.value = '';
+            this.messageInput.style.height = 'auto';
         }
+        // 隐藏上传进度条
+        this.hideUploadProgress();
         
         // 清空当前对话历史
         this.currentChatHistory = [];
@@ -616,7 +739,7 @@ class AiOpsAssistantApp {
         // 更新输入框状态
         if (this.messageInput) {
             this.messageInput.disabled = this.isStreaming;
-            this.messageInput.placeholder = '问问智能OnCall助手';
+            this.messageInput.placeholder = '向白泽提问…';
         }
     }
 
@@ -645,9 +768,10 @@ class AiOpsAssistantApp {
         // 显示用户消息
         this.addMessage('user', message);
         
-        // 清空输入框
+        // 清空输入框并重置高度
         if (this.messageInput) {
             this.messageInput.value = '';
+            this.messageInput.style.height = 'auto';
         }
 
         // 设置发送状态
@@ -1088,81 +1212,151 @@ class AiOpsAssistantApp {
 
     // 处理文件选择
     handleFileSelect(event) {
-        const file = event.target.files[0];
-        if (file) {
-            // 验证文件格式
+        const files = event.target.files;
+        if (!files || files.length === 0) return;
+
+        // 支持多文件上传
+        for (const file of files) {
             if (!this.validateFileType(file)) {
-                this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
-                this.fileInput.value = '';
-                return;
+                this.showNotification(`「${file.name}」格式不支持，请上传 TXT / Markdown / PDF / DOCX / XLSX`, 'error');
+                continue;
             }
             this.uploadFile(file);
+        }
+        if (this.fileInput) {
+            this.fileInput.value = '';
         }
     }
 
     // 验证文件类型
     validateFileType(file) {
         const fileName = file.name.toLowerCase();
-        const allowedExtensions = ['.txt', '.md', '.markdown'];
+        const allowedExtensions = ['.txt', '.md', '.markdown', '.pdf', '.docx', '.xlsx'];
         return allowedExtensions.some(ext => fileName.endsWith(ext));
     }
 
-    // 上传文件到知识库
+    // 上传文件到知识库（带进度条）
     async uploadFile(file) {
         // 再次验证文件类型（双重保险）
         if (!this.validateFileType(file)) {
-            this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+            this.showNotification('文件格式不支持，请上传 TXT / Markdown / PDF / DOCX / XLSX', 'error');
             return;
         }
 
-        // 验证文件大小（限制为50MB）
-        const maxSize = 50 * 1024 * 1024;
+        // 验证文件大小（限制为10MB，与后端保持一致）
+        const maxSize = 10 * 1024 * 1024;
         if (file.size > maxSize) {
-            this.showNotification('文件大小不能超过50MB', 'error');
+            this.showNotification(`「${file.name}」大小超过 10MB 限制`, 'error');
             return;
         }
 
-        // 锁定前端并显示上传遮罩层
+        // 锁定前端（不阻塞输入，仅禁用发送）
         this.isStreaming = true;
         this.updateUI();
-        this.showUploadOverlay(true, file.name);
+        this.showUploadProgress(file.name, 0);
 
-        try {
+        return new Promise((resolve, reject) => {
             // 创建 FormData
             const formData = new FormData();
             formData.append('file', file);
 
-            // 发送上传请求
-            const response = await fetch(`${this.apiBaseUrl}/upload`, {
-                method: 'POST',
-                body: formData
-            });
+            // 使用 XHR 实现上传进度跟踪
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', `${this.apiBaseUrl}/upload`);
+            
+            // 上传进度事件
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    this.updateUploadProgress(percent);
+                }
+            };
+            
+            // 完成事件
+            xhr.onload = () => {
+                try {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        const data = JSON.parse(xhr.responseText);
+                        if ((data.code === 200 || data.message === 'success') && data.data) {
+                            this.updateUploadProgress(100);
+                            this.markUploadDone();
+                            // 在聊天界面显示上传成功消息
+                            const successMessage = `${file.name} 上传到知识库成功`;
+                            this.addMessage('assistant', successMessage, false, true);
+                            this.showNotification('文件上传成功', 'success');
+                            resolve(data);
+                        } else {
+                            throw new Error(data.message || data.detail || '上传失败');
+                        }
+                    } else {
+                        // 后端 HTTPException 会返回 {detail: "..."}
+                        let detail = `HTTP错误: ${xhr.status}`;
+                        try {
+                            const errData = JSON.parse(xhr.responseText);
+                            if (errData.detail) detail = errData.detail;
+                        } catch (e) { /* ignore */ }
+                        throw new Error(detail);
+                    }
+                } catch (error) {
+                    this.showNotification('文件上传失败: ' + error.message, 'error');
+                    reject(error);
+                } finally {
+                    this.isStreaming = false;
+                    this.updateUI();
+                    // 进度条保留2.5秒展示完成状态后隐藏
+                    setTimeout(() => this.hideUploadProgress(), 2500);
+                }
+            };
+            
+            // 网络错误
+            xhr.onerror = () => {
+                this.isStreaming = false;
+                this.updateUI();
+                this.hideUploadProgress();
+                const error = new Error('网络错误，上传失败');
+                this.showNotification(error.message, 'error');
+                reject(error);
+            };
+            
+            xhr.send(formData);
+        });
+    }
 
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
+    // 显示上传进度条
+    showUploadProgress(fileName, percent = 0) {
+        if (this.uploadProgress) {
+            this.uploadProgress.hidden = false;
+            this.uploadProgress.classList.remove('done');
+            if (this.uploadProgressBar) this.uploadProgressBar.style.width = percent + '%';
+            if (this.uploadProgressName) this.uploadProgressName.textContent = fileName;
+            if (this.uploadProgressPercent) this.uploadProgressPercent.textContent = percent + '%';
+        }
+    }
 
-            const data = await response.json();
+    // 更新上传进度
+    updateUploadProgress(percent) {
+        if (this.uploadProgressBar) {
+            this.uploadProgressBar.style.width = Math.min(100, Math.max(0, percent)) + '%';
+        }
+        if (this.uploadProgressPercent) {
+            this.uploadProgressPercent.textContent = percent + '%';
+        }
+    }
 
-            if ((data.code === 200 || data.message === 'success') && data.data) {
-                // 在聊天界面显示上传成功消息
-                const successMessage = `${file.name} 上传到知识库成功`;
-                this.addMessage('assistant', successMessage, false, true);
-            } else {
-                throw new Error(data.message || '上传失败');
-            }
-        } catch (error) {
-            console.error('文件上传失败:', error);
-            this.showNotification('文件上传失败: ' + error.message, 'error');
-        } finally {
-            // 清空文件输入
-            if (this.fileInput) {
-                this.fileInput.value = '';
-            }
-            // 解锁前端
-            this.isStreaming = false;
-            this.showUploadOverlay(false);
-            this.updateUI();
+    // 标记上传完成
+    markUploadDone() {
+        if (this.uploadProgress) {
+            this.uploadProgress.classList.add('done');
+            if (this.uploadProgressPercent) this.uploadProgressPercent.textContent = '100%';
+        }
+    }
+
+    // 隐藏上传进度条
+    hideUploadProgress() {
+        if (this.uploadProgress) {
+            this.uploadProgress.hidden = true;
+            this.uploadProgress.classList.remove('done');
+            if (this.uploadProgressBar) this.uploadProgressBar.style.width = '0%';
         }
     }
 
@@ -1627,26 +1821,6 @@ class AiOpsAssistantApp {
                 const loadingSubtext = this.loadingOverlay.querySelector('.loading-subtext');
                 if (loadingText) loadingText.textContent = '智能运维分析中，请稍候...';
                 if (loadingSubtext) loadingSubtext.textContent = '后端正在处理，请耐心等待';
-                // 防止页面滚动
-                document.body.style.overflow = 'hidden';
-            } else {
-                this.loadingOverlay.style.display = 'none';
-                // 恢复页面滚动
-                document.body.style.overflow = '';
-            }
-        }
-    }
-
-    // 显示/隐藏上传遮罩层
-    showUploadOverlay(show, fileName = '') {
-        if (this.loadingOverlay) {
-            if (show) {
-                this.loadingOverlay.style.display = 'flex';
-                // 更新文字为上传中
-                const loadingText = this.loadingOverlay.querySelector('.loading-text');
-                const loadingSubtext = this.loadingOverlay.querySelector('.loading-subtext');
-                if (loadingText) loadingText.textContent = '正在上传文件...';
-                if (loadingSubtext) loadingSubtext.textContent = fileName ? `上传: ${fileName}` : '请稍候';
                 // 防止页面滚动
                 document.body.style.overflow = 'hidden';
             } else {

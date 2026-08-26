@@ -3,7 +3,8 @@
 使用 Pydantic Settings 实现类型安全的配置管理
 """
 
-from typing import Dict, Any
+from typing import Any
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +46,10 @@ class Settings(BaseSettings):
     context_compress_ratio: float = 0.7  # 触发压缩的上下文占用比例（70% 时触发）
     context_keep_messages: int = 20  # 压缩后保留的最近消息条数（20 条 ≈ 10 轮对话）
 
+    # 记忆持久化配置：使用 SQLite 保存会话历史（LangGraph AsyncSqliteSaver）
+    # 服务重启后历史不丢失，用户请求到来时 agent 自动从 DB 检索该会话的历史消息
+    memory_db_path: str = "data/memory.db"  # 会话历史 DB 文件路径（相对项目根目录）
+
     # 重排（Rerank）配置：召回后使用百炼重排模型对文档相关性重新排序
     rerank_enabled: bool = True  # 是否启用重排（关闭时退化为纯向量召回）
     rerank_model: str = "qwen3-rerank"  # 百炼重排模型（gte-rerank 已于 2026-05-30 下线）
@@ -78,7 +83,7 @@ class Settings(BaseSettings):
     enable_prometheus_alerts: bool = True
 
     @property
-    def mcp_servers(self) -> Dict[str, Dict[str, Any]]:
+    def mcp_servers(self) -> dict[str, dict[str, Any]]:
         """获取完整的 MCP 服务器配置"""
         return {
             "cls": {
