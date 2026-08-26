@@ -57,6 +57,9 @@ logs/
 *.db
 *.sqlite
 
+# 运行时数据（对话记忆 SQLite 等）
+data/
+
 # Milvus
 volumes/
 

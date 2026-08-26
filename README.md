@@ -4,11 +4,16 @@
 
 系统面向运维场景，以 LangGraph 构建 Agent 编排层，通过 MCP（Model Context Protocol）协议接入日志检索与监控指标工具，在收到告警后自动执行"告警获取 → 日志取证 → 指标分析 → 根因定位 → 修复建议"的完整诊断链路，并将结果以结构化报告输出。
 
+## 界面预览
+
+![白泽 · 智能Lab助手主界面](docs/main-ui.png)
+
 ## 核心特性
 
-- **RAG 知识库问答** — 支持 Markdown/纯文本文档上传，自动完成分块、Embedding、向量化入库；对话时基于 Milvus 检索增强生成，回答可溯源至知识文档
+- **RAG 知识库问答** — 支持 Markdown/纯文本/PDF/Word/Excel 多格式文档上传，自动完成分块、Embedding、向量化入库；检索链路为「向量召回 + BM25 词法召回 + RRF 融合 + 重排」的混合检索，回答可溯源至知识文档
 - **AIOps 自动故障诊断** — 基于 Plan-Execute-Replan 模式编排诊断流程：规划器制定诊断计划、执行器调用工具取证、重规划器动态调整策略，最终生成包含根因分析与修复建议的结构化诊断报告
 - **流式交互** — 对话与诊断过程均通过 SSE 流式输出（工具调用状态、检索结果、内容片段实时推送），前端可呈现完整推理过程
+- **长对话记忆与上下文压缩** — 会话历史持久化到 SQLite（服务重启不丢失）；当上下文占用达到窗口 70% 时自动将早期对话总结为摘要并保留最近 20 条，长对话不溢出、不丢要点
 - **MCP 工具集成** — 内置日志查询/告警/监控指标工具服务（本地 Mock 开箱即用），可平滑切换至腾讯云 CLS 真实日志服务
 - **Web 控制台** — 原生实现的现代化 Web 界面，无需构建步骤，支持会话管理、流式渲染与 Markdown 展示
 
@@ -63,7 +68,7 @@ notepad .env
 | 清空会话 | POST | `/api/chat/clear` | 按会话 ID 清空历史（参数 `sessionId`） |
 | 会话查询 | GET | `/api/chat/session/{session_id}` | 获取会话历史 |
 | AIOps 诊断 | POST | `/api/aiops` | SSE 流式故障诊断（status/plan/step/report/complete 事件） |
-| 文件上传 | POST | `/api/upload` | 上传文档并自动建立向量索引（支持 txt/md，≤10MB） |
+| 文件上传 | POST | `/api/upload` | 上传文档并自动建立向量索引（支持 txt/md/pdf/docx/xlsx，≤10MB） |
 | 目录索引 | POST | `/api/index_directory` | 批量索引指定目录下所有文档（参数 `directory_path`） |
 | 健康检查 | GET | `/health` | 服务状态与 Milvus 连接状态 |
 
@@ -110,6 +115,8 @@ ai-ops-assistant/
 │   ├── core/                           # 基础设施（LLM 工厂、Milvus 客户端）
 │   └── utils/                          # 日志配置
 ├── static/                             # Web 前端（原生 HTML/JS/CSS，见 static/README.md）
+├── docs/                               # 项目文档与界面截图
+├── data/                               # 运行时数据（对话记忆 SQLite：data/memory.db）
 ├── mcp_servers/                        # MCP 工具服务（CLS 日志 mock + Monitor 指标 mock，见 mcp_servers/README.md）
 ├── aiops-docs/                         # 运维知识库语料（RAG 数据源，见 aiops-docs/README.md）
 ├── scripts/                            # 辅助验证脚本（见 scripts/README.md）
@@ -132,6 +139,15 @@ ai-ops-assistant/
 | `DASHSCOPE_EMBEDDING_MODEL` | 否 | Embedding 模型，默认 `text-embedding-v4` |
 | `MILVUS_HOST` / `MILVUS_PORT` | 否 | Milvus 连接地址，默认 `localhost:19530` |
 | `RAG_TOP_K` | 否 | 检索召回条数，默认 3 |
+| `RERANK_ENABLED` | 否 | 是否启用重排，默认 `true`（关闭退化为纯向量召回） |
+| `RERANK_MODEL` | 否 | 重排模型，默认 `qwen3-rerank` |
+| `RERANK_RETRIEVE_K` | 否 | 向量召回窗口，默认 6（重排后保留前 `RAG_TOP_K` 条） |
+| `HYBRID_SEARCH_ENABLED` | 否 | 是否启用混合检索（向量+BM25+RRF），默认 `true` |
+| `BM25_RETRIEVE_K` / `RRF_K` | 否 | BM25 召回窗口 / RRF 融合常数，默认 6 / 60 |
+| `CONTEXT_WINDOW_TOKENS` | 否 | 模型上下文窗口大小，默认 32768 |
+| `CONTEXT_COMPRESS_RATIO` | 否 | 上下文压缩触发比例，默认 0.7（70%） |
+| `CONTEXT_KEEP_MESSAGES` | 否 | 压缩后保留的最近消息条数，默认 20 |
+| `MEMORY_DB_PATH` | 否 | 会话历史 SQLite 文件路径，默认 `data/memory.db` |
 | `MCP_CLS_URL` / `MCP_MONITOR_URL` | 否 | MCP 工具服务地址，默认本地 Mock（8383/8384） |
 
 ## 常见问题
@@ -146,7 +162,7 @@ A: 确认 Docker Desktop 已启动，执行 `docker compose -f vector-database.y
 A: 检查 `.env` 中 `DASHSCOPE_API_KEY` 是否正确填写，修改后重启服务。
 
 **Q: 如何新增运维知识文档**
-A: 将 Markdown 文档放入 `aiops-docs/` 后重启服务自动入库，或调用 `/api/upload` 接口手动上传，详见 `aiops-docs/README.md`。
+A: 支持 Markdown、纯文本、PDF、Word、Excel 格式，放入 `aiops-docs/` 后重启服务自动入库，或调用 `/api/upload` 接口手动上传（≤10MB），详见 `aiops-docs/README.md`。
 
 **Q: 如何接入真实日志服务**
 A: 通过 `MCP_CLS_TRANSPORT` / `MCP_CLS_URL` 切换至腾讯云 CLS，配置步骤见 `mcp_servers/README.md`。

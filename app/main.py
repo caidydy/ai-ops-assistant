@@ -37,6 +37,10 @@ async def lifespan(app: FastAPI):
 
     # 初始化记忆持久化（SQLite 会话历史检查点）
     # from_conn_string 是异步上下文管理器，常驻连接贯穿整个应用生命周期
+    # 确保数据库文件所在目录存在，否则 SQLite 报 "unable to open database file"
+    memory_db_dir = os.path.dirname(config.memory_db_path)
+    if memory_db_dir:
+        os.makedirs(memory_db_dir, exist_ok=True)
     checkpointer_ctx = AsyncSqliteSaver.from_conn_string(config.memory_db_path)
     checkpointer = await checkpointer_ctx.__aenter__()
     try:

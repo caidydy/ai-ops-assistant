@@ -19,6 +19,10 @@ def setup_logger():
     # 移除默认处理器
     logger.remove()
 
+    # Windows 控制台默认 GBK 编码，无法输出 emoji（🚀✅等）会抛 UnicodeEncodeError，
+    # 把 stdout 显式切换为 UTF-8，避免日志在启动时刷屏报错
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     # 添加控制台输出（带颜色格式）
     logger.add(
         sys.stdout,
